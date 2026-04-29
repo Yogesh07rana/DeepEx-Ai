@@ -2,9 +2,8 @@ import json
 import os
 import uuid
 import threading
-
 from deepfake_detector import highlight_face
-from flask import Flask, request, redirect, url_for, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request
 from PIL import Image
 import torch
 from transformers import AutoImageProcessor, AutoModelForImageClassification
@@ -36,11 +35,14 @@ with torch.no_grad():
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# Feedback stored inside static/uploads so it's on the writable path
+FEEDBACK_FILE = os.path.join(UPLOAD_FOLDER, "feedback.json")
+
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg"}
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "avi", "mov", "mkv"}
 ALLOWED_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS
 
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB limit
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB limit
 
 MAX_VIDEO_FRAMES = 20
 FRAME_BATCH_SIZE = 8
@@ -50,16 +52,20 @@ _jobs: dict = {}
 _jobs_lock = threading.Lock()
 
 
-def allowed_file(filename):
+# ===============================
+# Helpers
+# ===============================
+def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def is_video(filename):
+def is_video(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_VIDEO_EXTENSIONS
 
 
 def preprocess_image(image: Image.Image) -> Image.Image:
-    return image.resize(MODEL_INPUT_SIZE, Image.BILINEAR)
+    # Image.BILINEAR is deprecated in Pillow >=10 — use Resampling enum
+    return image.resize(MODEL_INPUT_SIZE, Image.Resampling.BILINEAR)
 
 
 def predict_batch(images: list) -> list:
@@ -126,7 +132,7 @@ def _run_video_job(job_id: str, video_path: str):
                 })
 
         fake_frames = [r for r in frame_results if r["label"] == "FAKE"]
-        real_frames = [r for r in frame_results if r["label"] == "REAL"]
+        real_frames  = [r for r in frame_results if r["label"] == "REAL"]
 
         if len(fake_frames) >= len(real_frames):
             majority_label = "FAKE"
@@ -234,9 +240,9 @@ def job_status(job_id: str):
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
-    name = request.form.get("name", "")[:100]
-    rating = request.form.get("rating", "")[:10]
-    message = request.form.get("message", "")[:1000]
+    name              = request.form.get("name", "")[:100]
+    rating            = request.form.get("rating", "")[:10]
+    message           = request.form.get("message", "")[:1000]
     prediction_correct = request.form.get("prediction_correct", "")[:10]
 
     data = {
@@ -246,10 +252,9 @@ def feedback():
         "was_prediction_correct": prediction_correct,
     }
 
-    file_path = "feedback.json"
-
-    if os.path.exists(file_path):
-        with open(file_path, "r") as f:
+    # Read existing feedback (if any)
+    if os.path.exists(FEEDBACK_FILE):
+        with open(FEEDBACK_FILE, "r") as f:
             try:
                 feedback_data = json.load(f)
             except json.JSONDecodeError:
@@ -259,7 +264,7 @@ def feedback():
 
     feedback_data.append(data)
 
-    with open(file_path, "w") as f:
+    with open(FEEDBACK_FILE, "w") as f:
         json.dump(feedback_data, f, indent=4)
 
     return jsonify({"status": "ok"})
